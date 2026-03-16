@@ -100,6 +100,9 @@ impl eframe::App for App {
             if ui.button("Resume!").clicked() {
                 self.sim.resume();
             }
+            if ui.button("Modify!").clicked() {
+                self.sim.modify_data( |data| *data = TestData { data: Array2::<f64>::zeros((200,200)) });
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {

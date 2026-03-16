@@ -1,5 +1,7 @@
 use std::{sync::{Arc, Condvar, Mutex, atomic::AtomicBool}, thread};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+
 use crate::mpscsingle;
 
 #[derive(Default)]
@@ -31,6 +33,7 @@ pub struct SimulationHandler<T: SimulationData + 'static> {
     params: Arc<Mutex<T::SimParams>>,
     shared_data_ref: Arc<Mutex<Option<T>>>,
     rx: Option<mpscsingle::Receiver<T::SimRes>>,
+    tx: Option<mpsc::Sender<Box<dyn FnOnce(&mut T) + Send>>>,
     new_data_flag: Arc<AtomicBool>,
     paused_flag: Arc<(AtomicBool, Condvar, Mutex<()>)>,
     send_freq: usize   
@@ -42,7 +45,7 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
         let new_data_flag = Arc::new(AtomicBool::new(false));
         let paused_flag = Arc::new((AtomicBool::new(false), Condvar::new(), Mutex::new(())));
         let params = Arc::new(Mutex::new(parameters));
-        Self { params, shared_data_ref, rx: None, new_data_flag, paused_flag, send_freq: 1 }
+        Self { params, shared_data_ref, rx: None, tx: None, new_data_flag, paused_flag, send_freq: 1 }
     }
 
     pub fn send_frequency(mut self, frequency: usize) -> Self {
@@ -63,8 +66,10 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
             let paused_flag = Arc::clone(&self.paused_flag);
 
             let (tx, rx) = mpscsingle::channel();
+            let (ftx, frx) = mpsc::channel();
 
             self.rx = Some(rx);
+            self.tx = Some(ftx);
 
             thread::spawn(move || {
                 let params = { sim_params.lock().unwrap().clone() };
@@ -100,6 +105,10 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
                         }
                     }
 
+                    if let Ok(f) = frx.try_recv() {
+                        f(&mut data);
+                    }
+
                     ctx.increment_step();
                 }
 
@@ -111,6 +120,15 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
         match &self.rx {
             Some(rx) => rx.try_recv(),
             None => None
+        }
+    }
+
+    pub fn modify_data<F>(&self, f: F)
+    where
+        F: FnOnce(&mut SimData) + Send + 'static
+    {
+        if let Some(tx) = &self.tx {
+            tx.send(Box::new(f)).unwrap();
         }
     }
 
