@@ -89,7 +89,6 @@ impl eframe::App for App {
         egui::SidePanel::new(egui::panel::Side::Left, Id::new("side_panel")).show(ctx, |ui| {
             ui.label("Hello");
             ui.label("world");
-            ui.label("success");
             ui.label(format!("Plot position: {} {}", self.test_pos.x, self.test_pos.y));
             if ui.button("Run!").clicked() {
                 //self.heatmap.update_data(&generate_test_dataB(100, 100));
