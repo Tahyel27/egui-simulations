@@ -1,38 +1,48 @@
-use std::{ops::Deref, sync::mpsc::{self, Receiver}, thread};
+use std::{sync::{Arc, Condvar, Mutex, atomic::AtomicBool}, thread};
+use std::sync::atomic::Ordering;
 use crate::mpscsingle;
-use tokio::sync::watch;
 
 #[derive(Default)]
-pub struct SimulationContext {
-    step: usize
+pub struct SimulationContext<Params> {
+    step: usize,
+    params: Params
 }
 
-impl SimulationContext {
+impl<Params> SimulationContext<Params> {
     fn increment_step(&mut self) { self.step = self.step + 1; }
 
     pub fn get_step(&self) -> usize {self.step}
+
+    pub fn get_params(&self) -> &Params {&self.params}
 }
 
 pub trait SimulationData: Send {
-    type SimRes: Send + Sync + Clone;
+    type SimRes: Send;
 
-    fn update(&mut self, ctx: &SimulationContext) -> ();
+    type SimParams: Clone + Send;
 
-    fn send_result(&self, ctx: &SimulationContext) -> Self::SimRes;
+    fn update(&mut self, ctx: &SimulationContext<Self::SimParams>) -> ();
+
+    fn send_result(&self, ctx: &SimulationContext<Self::SimParams>) -> Self::SimRes;
 }
 
 #[derive(Default)]
-pub struct SimulationHandler<T: SimulationData + Clone + 'static> {
-    data: Option<T>,
-    //rx: Option<Receiver<T::SimRes>>,
+pub struct SimulationHandler<T: SimulationData + 'static> {
+    params: Arc<Mutex<T::SimParams>>,
+    shared_data_ref: Arc<Mutex<Option<T>>>,
     rx: Option<mpscsingle::Receiver<T::SimRes>>,
-    rx_tk: Option<watch::Receiver<Option<T::SimRes>>>,
+    new_data_flag: Arc<AtomicBool>,
+    paused_flag: Arc<(AtomicBool, Condvar, Mutex<()>)>,
     send_freq: usize   
 }
 
-impl<SimData: SimulationData + Clone + 'static> SimulationHandler<SimData> {
-    pub fn new(initial_data: SimData) -> Self {
-        Self { data: Some(initial_data), rx: None, rx_tk: None, send_freq: 1 }
+impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
+    pub fn new(initial_data: SimData, parameters: SimData::SimParams) -> Self {
+        let shared_data_ref = Arc::new(Mutex::new(Some(initial_data)));
+        let new_data_flag = Arc::new(AtomicBool::new(false));
+        let paused_flag = Arc::new((AtomicBool::new(false), Condvar::new(), Mutex::new(())));
+        let params = Arc::new(Mutex::new(parameters));
+        Self { params, shared_data_ref, rx: None, new_data_flag, paused_flag, send_freq: 1 }
     }
 
     pub fn send_frequency(mut self, frequency: usize) -> Self {
@@ -41,29 +51,52 @@ impl<SimData: SimulationData + Clone + 'static> SimulationHandler<SimData> {
     }
 
     pub fn run(&mut self) {
-        if let Some(data) = &mut self.data {
-            
-            let mut data_clone = data.clone();
+
+        let data_opt = {self.shared_data_ref.lock().unwrap().take()};
+
+        if let Some(mut data) = data_opt {
 
             let send_freq = self.send_freq;
+            let new_data_flag = Arc::clone(&self.new_data_flag);
+            let shared_data_ref = Arc::clone(&self.shared_data_ref);
+            let sim_params = Arc::clone(&self.params);
+            let paused_flag = Arc::clone(&self.paused_flag);
 
-            //let (tx, rx) = mpsc::channel();
-            //let (tx, rx) = watch::channel(None);
             let (tx, rx) = mpscsingle::channel();
 
             self.rx = Some(rx);
 
             thread::spawn(move || {
-                let mut ctx = SimulationContext{ step: 0};
+                let params = { sim_params.lock().unwrap().clone() };
+
+                let mut ctx = SimulationContext{ step: 0, params};
                 
                 loop {
-                    data_clone.update(&ctx);
+                    ctx.params = sim_params.lock().unwrap().clone();
 
-                    let res = data_clone.send_result(&ctx);
+                    data.update(&ctx);
+
+                    let res = data.send_result(&ctx);
 
                     if ctx.step % send_freq == 0 {
                         if tx.send(res).is_err() {
                             break ;
+                        }
+                    }
+
+                    if new_data_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        let new_data = shared_data_ref.lock().unwrap().take();
+                        if let Some(ndata) = new_data {
+                            data = ndata;
+                        }
+
+                        new_data_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    if paused_flag.0.load(std::sync::atomic::Ordering::Relaxed) {
+                        let mut guard = paused_flag.2.lock().unwrap();
+                        while paused_flag.0.load(std::sync::atomic::Ordering::Relaxed) {
+                            guard = paused_flag.1.wait(guard).unwrap();
                         }
                     }
 
@@ -79,11 +112,37 @@ impl<SimData: SimulationData + Clone + 'static> SimulationHandler<SimData> {
             Some(rx) => rx.try_recv(),
             None => None
         }
+    }
 
-        /*match &self.rx_tk {
-            Some(rx) => rx.borrow().deref().clone() ,
-            None => None
-        }*/
+    pub fn pause(&mut self) {
+        self.paused_flag.0.store(true, Ordering::Relaxed);
+    }
 
+    pub fn resume(&mut self) {
+        self.paused_flag.0.store(false, Ordering::Relaxed);
+        self.paused_flag.1.notify_all();
+    }
+
+    pub fn get_params(&self) -> SimData::SimParams {
+        self.params.lock().unwrap().clone()
+    }
+
+    pub fn update_params<F>(&mut self, f: F) where
+        F: FnOnce(&mut SimData::SimParams) -> () 
+    {
+        let mut params = self.params.lock().unwrap();
+        f(&mut params)
+    }
+    
+
+    pub fn set_params(&mut self, params: SimData::SimParams) {
+        let mut shared = self.params.lock().unwrap();
+        *shared = params;
+    }
+
+    pub fn set_data(&mut self, data: SimData) {
+        let mut shared = self.shared_data_ref.lock().unwrap();
+        let _ = shared.insert(data);
+        self.new_data_flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

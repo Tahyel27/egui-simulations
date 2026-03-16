@@ -3,12 +3,11 @@ mod heatmap;
 mod simhandler;
 mod mpscsingle;
 
-use colormap::BWColormap;
 use heatmap::HeatmapPlot;
 
 use core::f64;
 
-use eframe::egui::{self, Id};
+use eframe::egui::{self, Id, Pos2};
 use ndarray::Array2;
 
 use crate::{colormap::RainbowColormap, simhandler::SimulationHandler};
@@ -16,6 +15,12 @@ use crate::{colormap::RainbowColormap, simhandler::SimulationHandler};
 #[derive(Default,Clone)]
 struct TestData {
     data: Array2<f64>
+}
+
+#[derive(Default,Clone)]
+struct TestParams {
+    x: f64,
+    y: f64,
 }
 
 impl TestData {
@@ -26,16 +31,20 @@ impl TestData {
 
 impl simhandler::SimulationData for TestData {
     type SimRes = Array2<f64>;
+
+    type SimParams = TestParams;
     
-    fn update(&mut self, ctx: &simhandler::SimulationContext) -> () {
+    fn update(&mut self, ctx: &simhandler::SimulationContext<Self::SimParams>) -> () {
         let t = ctx.get_step();
         let (rows, cols) = self.data.dim();
+
+        let center = ctx.get_params();
     
     // Define wave parameters
-        let center_x = rows as f64 / 2.0;
-        let center_y = cols as f64 / 2.0;
+        let center_x = rows as f64 / 2.0 + center.x;
+        let center_y = cols as f64 / 2.0 - center.y;
         let frequency = 0.2; // How tightly packed the rings are
-        let speed = 0.1;     // How fast it expands per step
+        let speed = 0.1;   // How fast it expands per step
 
     // We use indexed_iter_mut to get coordinates and a mutable reference to each cell
         self.data.indexed_iter_mut().for_each(|((i, j), val)| {
@@ -51,23 +60,24 @@ impl simhandler::SimulationData for TestData {
 
     }
 
-    fn send_result(&self, ctx: &simhandler::SimulationContext) -> Self::SimRes {
+    fn send_result(&self, ctx: &simhandler::SimulationContext<Self::SimParams>) -> Self::SimRes {
         self.data.clone()
     }
 }
 
 struct App {
     heatmap: HeatmapPlot,
-    sim: SimulationHandler<TestData>
+    sim: SimulationHandler<TestData>,
+    test_pos: Pos2
 }
 
 impl App {
     fn new(ctx: &eframe::CreationContext) -> Self {
         let mut hmap = HeatmapPlot::default();
         hmap.update_data(&generate_test_dataB(500, 500));
-        let handle = SimulationHandler::new(TestData::new(800, 800))
+        let handle = SimulationHandler::new(TestData::new(500, 400), TestParams::default())
             .send_frequency(1);
-        App { heatmap: hmap, sim: handle }
+        App { heatmap: hmap, sim: handle, test_pos: Pos2::new(0., 0.) }
     }
 }
 
@@ -80,17 +90,31 @@ impl eframe::App for App {
             ui.label("Hello");
             ui.label("world");
             ui.label("success");
-            if ui.button("Click!").clicked() {
+            ui.label(format!("Plot position: {} {}", self.test_pos.x, self.test_pos.y));
+            if ui.button("Run!").clicked() {
                 //self.heatmap.update_data(&generate_test_dataB(100, 100));
                 self.sim.run();
             }
-            if ui.button("Update!").clicked() {
-                self.sim.try_receive().inspect(|rec| {self.heatmap.update_data(rec);});
+            if ui.button("Pause!").clicked() {
+                self.sim.pause();
+            }
+            if ui.button("Resume!").clicked() {
+                self.sim.resume();
             }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.heatmap.plot_with_cmap(ui, &RainbowColormap::new(-1.0, 1.0))
+            let res = self.heatmap.plot_with_cmap(ui, &RainbowColormap::new(-1.0, 1.0));
+            if res.response.clicked() {
+                if let Some(pos) = res.pos {
+                    self.test_pos = pos.to_pos2();
+                    self.sim.update_params(|p| {
+                        p.x = pos.x;
+                        p.y = pos.y;
+                    });
+                }
+            }
+            res.response
         });
 
         ctx.request_repaint();
