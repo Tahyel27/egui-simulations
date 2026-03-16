@@ -74,7 +74,7 @@ struct App {
 impl App {
     fn new(ctx: &eframe::CreationContext) -> Self {
         let mut hmap = HeatmapPlot::default();
-        hmap.update_data(&generate_test_dataB(500, 500));
+        hmap.update_data(&generate_test_data(500, 500));
         let handle = SimulationHandler::new(TestData::new(500, 400), TestParams::default())
             .send_frequency(1);
         App { heatmap: hmap, sim: handle, test_pos: Pos2::new(0., 0.) }
@@ -122,27 +122,6 @@ impl eframe::App for App {
 }
 
 fn generate_test_data(dimx: usize, dimy: usize) -> Array2<f64> {
-    let center_x = dimx as f64 / 2.0;
-    let center_y = dimy as f64 / 2.0;
-    
-    // Adjust the frequency to change how "tight" the rings are.
-    // A smaller value means wider rings.
-    let frequency = 0.2;
-
-    Array2::from_shape_fn((dimx, dimy), |(i, j)| {
-        let dx = i as f64 - center_x;
-        let dy = j as f64 - center_y;
-        
-        // Calculate Euclidean distance from the center:
-        // $d = \sqrt{(x - c_x)^2 + (y - c_y)^2}$
-        let distance = (dx * dx + dy * dy).sqrt();
-
-        // Calculate the sine and shift from [-1, 1] to [0, 1]
-        ( (distance * frequency).sin() + 1.0 ) / 2.0
-    })
-}
-
-fn generate_test_dataB(dimx: usize, dimy: usize) -> Array2<f64> {
     let scale = 0.1; // Controls the "tightness" of the waves
 
     Array2::from_shape_fn((dimx, dimy), |(i, j)| {
