@@ -81,9 +81,10 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
 
                     data.update(&ctx);
 
-                    let res = data.send_result(&ctx);
 
                     if ctx.step % send_freq == 0 {
+                        let res = data.send_result(&ctx);
+
                         if tx.send(res).is_err() {
                             break ;
                         }
