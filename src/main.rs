@@ -35,7 +35,7 @@ impl simhandler::SimulationData for TestData {
 
     type SimParams = TestParams;
     
-    fn update(&mut self, ctx: &simhandler::SimulationContext<Self::SimParams>) -> () {
+    fn update(&mut self, ctx: &mut simhandler::SimulationContext<Self::SimParams>) -> () {
         let t = ctx.get_step();
         let (rows, cols) = self.data.dim();
 

@@ -7,15 +7,30 @@ use crate::mpscsingle;
 #[derive(Default)]
 pub struct SimulationContext<Params> {
     step: usize,
-    params: Params
+    params: Params,
+    request_pause: bool,
+    request_stop: bool
 }
 
 impl<Params> SimulationContext<Params> {
+    fn new(params: Params) -> Self {
+        Self {
+            step: 0,
+            params,
+            request_pause: false,
+            request_stop: false
+        }
+    }
+    
     fn increment_step(&mut self) { self.step = self.step + 1; }
 
     pub fn get_step(&self) -> usize {self.step}
 
     pub fn get_params(&self) -> &Params {&self.params}
+
+    pub fn request_pause(&mut self) { self.request_pause = true }
+
+    pub fn request_stop(&mut self) { self.request_stop = true }
 }
 
 pub trait SimulationData: Send {
@@ -23,7 +38,7 @@ pub trait SimulationData: Send {
 
     type SimParams: Clone + Send;
 
-    fn update(&mut self, ctx: &SimulationContext<Self::SimParams>) -> ();
+    fn update(&mut self, ctx: &mut SimulationContext<Self::SimParams>) -> ();
 
     fn send_result(&self, ctx: &SimulationContext<Self::SimParams>) -> Self::SimRes;
 }
@@ -36,7 +51,8 @@ pub struct SimulationHandler<T: SimulationData + 'static> {
     tx: Option<mpsc::Sender<Box<dyn FnOnce(&mut T) + Send>>>,
     new_data_flag: Arc<AtomicBool>,
     paused_flag: Arc<(AtomicBool, Condvar, Mutex<()>)>,
-    send_freq: usize   
+    send_freq: usize,
+    stop_flag: Arc<AtomicBool>   
 }
 
 impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
@@ -45,7 +61,8 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
         let new_data_flag = Arc::new(AtomicBool::new(false));
         let paused_flag = Arc::new((AtomicBool::new(false), Condvar::new(), Mutex::new(())));
         let params = Arc::new(Mutex::new(parameters));
-        Self { params, shared_data_ref, rx: None, tx: None, new_data_flag, paused_flag, send_freq: 1 }
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        Self { params, shared_data_ref, rx: None, tx: None, new_data_flag, paused_flag, send_freq: 1, stop_flag }
     }
 
     pub fn send_frequency(mut self, frequency: usize) -> Self {
@@ -64,6 +81,7 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
             let shared_data_ref = Arc::clone(&self.shared_data_ref);
             let sim_params = Arc::clone(&self.params);
             let paused_flag = Arc::clone(&self.paused_flag);
+            let stop_flag = Arc::clone(&self.stop_flag);
 
             let (tx, rx) = mpscsingle::channel();
             let (ftx, frx) = mpsc::channel();
@@ -74,12 +92,12 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
             thread::spawn(move || {
                 let params = { sim_params.lock().unwrap().clone() };
 
-                let mut ctx = SimulationContext{ step: 0, params};
+                let mut ctx = SimulationContext::new(params);
                 
                 loop {
                     ctx.params = sim_params.lock().unwrap().clone();
 
-                    data.update(&ctx);
+                    data.update(&mut ctx);
 
 
                     if ctx.step % send_freq == 0 {
@@ -99,11 +117,18 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
                         new_data_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
 
+                    if ctx.request_pause { paused_flag.0.store(true, Ordering::Relaxed); }
+
                     if paused_flag.0.load(std::sync::atomic::Ordering::Relaxed) {
                         let mut guard = paused_flag.2.lock().unwrap();
                         while paused_flag.0.load(std::sync::atomic::Ordering::Relaxed) {
                             guard = paused_flag.1.wait(guard).unwrap();
                         }
+                        ctx.request_pause = false;
+                    }
+
+                    if stop_flag.load(Ordering::Relaxed) || ctx.request_stop {
+                        break;
                     }
 
                     if let Ok(f) = frx.try_recv() {
@@ -140,6 +165,10 @@ impl<SimData: SimulationData + 'static> SimulationHandler<SimData> {
     pub fn resume(&mut self) {
         self.paused_flag.0.store(false, Ordering::Relaxed);
         self.paused_flag.1.notify_all();
+    }
+
+    pub fn stop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
     }
 
     pub fn get_params(&self) -> SimData::SimParams {
