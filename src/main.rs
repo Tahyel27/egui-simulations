@@ -3,14 +3,15 @@ mod heatmap;
 mod simhandler;
 mod mpscsingle;
 
-use heatmap::HeatmapPlot;
+use heatmap::{HeatmapPlot, HeatmapState};
 
 use core::f64;
 
 use eframe::egui::{self, Id, Pos2};
 use ndarray::Array2;
 
-use crate::{colormap::RainbowColormap, simhandler::SimulationHandler};
+use crate::colormap::RainbowColormap; 
+use crate::simhandler::SimulationHandler;
 
 #[derive(Default,Clone)]
 struct TestData {
@@ -66,32 +67,31 @@ impl simhandler::SimulationData for TestData {
 }
 
 struct App {
-    heatmap: HeatmapPlot,
     sim: SimulationHandler<TestData>,
-    test_pos: Pos2
+    test_pos: Pos2,
+    heatmap: HeatmapState
 }
 
 impl App {
     fn new(ctx: &eframe::CreationContext) -> Self {
-        let mut hmap = HeatmapPlot::default();
-        hmap.update_data(&generate_test_data(500, 500));
+        let mut heatmap = HeatmapState::default();
+        heatmap.render_data(&generate_test_data(500, 500), &ctx.egui_ctx, RainbowColormap::new(0.0, 1.0));
         let handle = SimulationHandler::new(TestData::new(500, 400), TestParams::default())
             .send_frequency(1);
-        App { heatmap: hmap, sim: handle, test_pos: Pos2::new(0., 0.) }
+        App { sim: handle, test_pos: Pos2::new(0., 0.), heatmap }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         
-        self.sim.try_receive().inspect(|rec| {self.heatmap.update_data(rec);});
+        self.sim.try_receive().inspect(|rec| {self.heatmap.render_data(rec, ctx, RainbowColormap::new(-1.0, 1.0));});
 
         egui::SidePanel::new(egui::panel::Side::Left, Id::new("side_panel")).show(ctx, |ui| {
             ui.label("Hello");
             ui.label("world");
             ui.label(format!("Plot position: {} {}", self.test_pos.x, self.test_pos.y));
             if ui.button("Run!").clicked() {
-                //self.heatmap.update_data(&generate_test_dataB(100, 100));
                 self.sim.run();
             }
             if ui.button("Pause!").clicked() {
@@ -106,7 +106,10 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let res = self.heatmap.plot_with_cmap(ui, &RainbowColormap::new(-1.0, 1.0));
+            let res = HeatmapPlot::new(&self.heatmap)
+                .show_axes(true)
+                .show_grid(true)
+                .show(ui);
             if res.response.clicked() {
                 if let Some(pos) = res.pos {
                     self.test_pos = pos.to_pos2();
